@@ -1,0 +1,12 @@
+# =============================================================================
+# Client Configuration
+# =============================================================================
+
+server:
+  # Remote server URL - using SSH tunnel to localhost
+  # Run: ssh -L 9000:localhost:80 ubuntu@<SERVER_IP>
+  url: "http://localhost:9000"
+  # url: "http://<SERVER_IP>:80"
+  
+  # Request timeout in seconds
+  timeout: 300.0
