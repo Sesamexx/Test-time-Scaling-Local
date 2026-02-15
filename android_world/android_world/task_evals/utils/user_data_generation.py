@@ -317,9 +317,6 @@ def _create_test_mp3(
 
   Returns:
     The name of the file.
-    
-  Raises:
-    FileNotFoundError: If ffmpeg is not installed.
   """
   tone = pydub.AudioSegment.silent(duration=duration_milliseconds)
   try:
@@ -328,8 +325,9 @@ def _create_test_mp3(
     )
   except FileNotFoundError as e:
     raise FileNotFoundError(
-        "ffmpeg is required to create MP3 files but was not found. "
-        f"Original error: {e}"
+        "ffmpeg/ffprobe not found. pydub requires ffmpeg to export MP3 files."
+        " Install ffmpeg and ensure it is on your PATH."
+        " See https://ffmpeg.org/download.html"
     ) from e
   return file_path
 

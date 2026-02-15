@@ -1,18 +1,24 @@
 # =============================================================================
 # run_benchmark.py
 # Created:  [Lc-v0.0.2] 2026-02-04
-# Updated:  [Lc-v0.0.2] 2026-02-04 Add clean logging
+# Updated:  [Lc-v0.0.3] 2026-02-10 Add scaling strategy system;
+#           Centralise all config in config.yaml
 # =============================================================================
 """
 Run AndroidWorld benchmark with gelab-zero-4b-preview model.
 
+All defaults live in config.yaml.  CLI flags override them when provided.
+
 Usage:
-    # Run full benchmark
+    # Run with defaults from config.yaml
     python run_benchmark.py
-    
+
+    # Override scaling strategy on CLI
+    python run_benchmark.py --scaling=best_of_n_weighted --n_samples=16
+
     # Run specific task
     python run_benchmark.py --tasks=ContactsAddContact
-    
+
     # Run with emulator setup (first time only)
     python run_benchmark.py --perform_emulator_setup
 """
@@ -20,10 +26,21 @@ Usage:
 import os
 import sys
 import asyncio
-import json
 from typing import Any, Optional
 
 import numpy as np
+
+# ---------------------------------------------------------------------------
+# Force UTF-8 on Windows so emoji characters (✓, ✗, →, etc.) don't crash
+# ---------------------------------------------------------------------------
+if sys.platform == "win32":
+    for _stream_name in ("stdout", "stderr"):
+        _stream = getattr(sys, _stream_name, None)
+        if _stream is not None and hasattr(_stream, "reconfigure"):
+            try:
+                _stream.reconfigure(encoding="utf-8")
+            except Exception:
+                pass
 
 # Disable proxies for local server
 os.environ["HTTP_PROXY"] = ""
@@ -45,120 +62,324 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "android_world"))
 from android_world import checkpointer as checkpointer_lib
 from android_world import registry
 from android_world import suite_utils
-from android_world.agents import base_agent
 from android_world.agents import infer
-from android_world.agents import m3a
 from android_world.env import env_launcher
 
-from client import get_client, Config
+from client import get_client, AppConfig
+
+# Scaling strategies
+from scaling import BaselineStrategy, BestOfNWeightedStrategy
 
 logging.set_verbosity(logging.INFO)
 
 # =============================================================================
-# Flags
+# Flags (optional CLI overrides)
 # =============================================================================
 
+_CONFIG_PATH = flags.DEFINE_string(
+    'config', 'config.yaml',
+    'Path to the YAML configuration file.',
+)
 _ADB_PATH = flags.DEFINE_string(
-    'adb_path',
-    os.path.expandvars(r'%LOCALAPPDATA%\Android\Sdk\platform-tools\adb.exe'),
-    'Path to adb executable.',
+    'adb_path', None,
+    'Override: path to adb executable.',
 )
 _EMULATOR_SETUP = flags.DEFINE_boolean(
-    'perform_emulator_setup',
-    False,
-    'Whether to perform emulator setup (first time only).',
+    'perform_emulator_setup', None,
+    'Override: whether to perform emulator setup (first time only).',
 )
 _CONSOLE_PORT = flags.DEFINE_integer(
-    'console_port',
-    5554,
-    'The console port of the running Android device.',
+    'console_port', None,
+    'Override: console port of the running Android device.',
 )
 _TASKS = flags.DEFINE_list(
-    'tasks',
-    None,
-    'List of specific tasks to run. If None, run all tasks.',
+    'tasks', None,
+    'Override: specific tasks to run (comma-separated). If None, use config.',
 )
 _N_TASK_COMBINATIONS = flags.DEFINE_integer(
-    'n_task_combinations',
-    1,
-    'Number of task instances to run for each task template.',
+    'n_task_combinations', None,
+    'Override: number of task instances per template.',
 )
 _CHECKPOINT_DIR = flags.DEFINE_string(
-    'checkpoint_dir',
-    '',
-    'Directory to save checkpoints and resume from.',
+    'checkpoint_dir', None,
+    'Override: directory to save/resume checkpoints.',
 )
 _OUTPUT_PATH = flags.DEFINE_string(
-    'output_path',
-    os.path.expanduser('~/android_world/runs'),
-    'Path to save results.',
+    'output_path', None,
+    'Override: path to save results.',
 )
 _TASK_RANDOM_SEED = flags.DEFINE_integer(
-    'task_random_seed',
-    30,
-    'Random seed for task randomness.',
+    'task_random_seed', None,
+    'Override: random seed for task randomness.',
 )
 _MODEL_NAME = flags.DEFINE_string(
-    'model_name',
-    'gelab-zero-4b-preview',
-    'Model name to use for inference.',
+    'model_name', None,
+    'Override: model name for inference.',
 )
 _TEMPERATURE = flags.DEFINE_float(
-    'temperature',
-    0.0,
-    'Sampling temperature for the model.',
+    'temperature', None,
+    'Override: sampling temperature for the model.',
 )
+_SCALING = flags.DEFINE_string(
+    'scaling', None,
+    'Override: scaling strategy ("baseline" | "best_of_n_weighted").',
+)
+_N_SAMPLES = flags.DEFINE_integer(
+    'n_samples', None,
+    'Override: number of candidate samples for best-of-N strategies.',
+)
+_ACTOR_TEMPERATURE = flags.DEFINE_float(
+    'actor_temperature', None,
+    'Override: actor sampling temperature for best-of-N.',
+)
+_VERIFIER_MODEL = flags.DEFINE_string(
+    'verifier_model', None,
+    'Override: verifier model name for best-of-N weighted.',
+)
+_VERIFIER_BACKEND = flags.DEFINE_string(
+    'verifier_backend', None,
+    'Override: verifier backend ("local" | "openai_compatible").',
+)
+
+
+def _resolve_config() -> AppConfig:
+    """Load config.yaml, then overlay any CLI flag overrides."""
+    cfg = AppConfig.load(_CONFIG_PATH.value)
+
+    if _ADB_PATH.value is not None:
+        cfg.adb_path = _ADB_PATH.value
+    if _EMULATOR_SETUP.value is not None:
+        cfg.perform_emulator_setup = _EMULATOR_SETUP.value
+    if _CONSOLE_PORT.value is not None:
+        cfg.console_port = _CONSOLE_PORT.value
+    if _TASKS.value is not None:
+        cfg.tasks = _TASKS.value
+    if _N_TASK_COMBINATIONS.value is not None:
+        cfg.n_task_combinations = _N_TASK_COMBINATIONS.value
+    if _CHECKPOINT_DIR.value is not None:
+        cfg.checkpoint_dir = _CHECKPOINT_DIR.value
+    if _OUTPUT_PATH.value is not None:
+        cfg.output_path = _OUTPUT_PATH.value
+    if _TASK_RANDOM_SEED.value is not None:
+        cfg.task_random_seed = _TASK_RANDOM_SEED.value
+    if _MODEL_NAME.value is not None:
+        cfg.model_name = _MODEL_NAME.value
+    if _TEMPERATURE.value is not None:
+        cfg.model_temperature = _TEMPERATURE.value
+    if _SCALING.value is not None:
+        cfg.scaling_strategy = _SCALING.value
+    if _N_SAMPLES.value is not None:
+        cfg.bon_n_samples = _N_SAMPLES.value
+    if _ACTOR_TEMPERATURE.value is not None:
+        cfg.bon_actor_temperature = _ACTOR_TEMPERATURE.value
+    if _VERIFIER_MODEL.value is not None:
+        cfg.bon_verifier_model = _VERIFIER_MODEL.value
+    if _VERIFIER_BACKEND.value is not None:
+        cfg.bon_verifier_backend = _VERIFIER_BACKEND.value
+
+    return cfg
 
 # =============================================================================
 # GelabWrapper - Multimodal LLM Wrapper for Remote Server
 # =============================================================================
 
 class SimpleLogger:
-    """Simple logger that writes clean, human-readable logs."""
-    
-    def __init__(self, log_path: str):
-        self.log_path = log_path
-        self.step_count = 0
-        
-        # Create log file with header
-        with open(self.log_path, 'w', encoding='utf-8') as f:
-            f.write("=" * 80 + "\n")
-            f.write("AndroidWorld Benchmark - Clean Log\n")
-            f.write(f"Model: gelab-zero-4b-preview\n")
-            f.write(f"Started: {self._get_timestamp()}\n")
-            f.write("=" * 80 + "\n\n")
-    
-    def _get_timestamp(self):
+    """Two-level human-readable logger (info + debug).
+
+    * **info** log  – all candidates with their scores, aggregated ranking,
+      and summarisation results.
+    * **debug** log – everything in info PLUS full actor prompts, raw LLM
+      responses, and verifier raw responses.
+
+    Both files are plain-text; the info log is also echoed to stdout.
+
+    Step numbering is tracked internally and reset on each new task.
+    """
+
+    def __init__(self, base_path: str, model_name: str = "gelab-zero-4b-preview"):
+        self.model_name = model_name
+        self.info_path = base_path + ".info.log"
+        self.debug_path = base_path + ".debug.log"
+        self._step = 0  # reset per task
+
+        sep = "=" * 80
+        header = (
+            sep + "\n"
+            "AndroidWorld Benchmark Log\n"
+            f"Model : {self.model_name}\n"
+            f"Start : {self._ts()}\n"
+            + sep + "\n\n"
+        )
+        for p in (self.info_path, self.debug_path):
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(header)
+
+    # ---- helpers ----
+
+    @staticmethod
+    def _ts():
         from datetime import datetime
         return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
+
+    def _write(self, level: str, text: str):
+        """Append *text* to the appropriate log file(s).
+
+        level="info"  → write to both info and debug logs.
+        level="debug" → write to debug log only.
+        """
+        if level == "info":
+            for p in (self.info_path, self.debug_path):
+                with open(p, "a", encoding="utf-8") as f:
+                    f.write(text)
+        else:
+            with open(self.debug_path, "a", encoding="utf-8") as f:
+                f.write(text)
+
+    # ---- task-level callbacks (wired to suite_utils) ----
+
     def log_task_start(self, task_name: str, goal: str):
-        """Log task start."""
-        with open(self.log_path, 'a', encoding='utf-8') as f:
-            f.write("\n" + "=" * 80 + "\n")
-            f.write(f"TASK: {task_name}\n")
-            f.write(f"GOAL: {goal}\n")
-            f.write(f"TIME: {self._get_timestamp()}\n")
-            f.write("=" * 80 + "\n\n")
-        self.step_count = 0
-    
-    def log_step(self, request_summary: str, response: str, action: str):
-        """Log a single step."""
-        self.step_count += 1
-        with open(self.log_path, 'a', encoding='utf-8') as f:
-            f.write(f"--- Step {self.step_count} ---\n")
-            f.write(f"Request: {request_summary}\n")
-            f.write(f"Response: {response}\n")
-            f.write(f"Action: {action}\n\n")
-    
-    def log_task_result(self, task_name: str, success: bool, details: str = ""):
-        """Log task completion."""
-        with open(self.log_path, 'a', encoding='utf-8') as f:
-            f.write(f"\n{'✓' if success else '✗'} RESULT: {task_name} - ")
-            f.write(f"{'SUCCESS' if success else 'FAILED'}\n")
-            if details:
-                f.write(f"Details: {details}\n")
-            f.write("\n")
+        """Called before a task episode begins."""
+        self._step = 0
+        sep = "=" * 80
+        block = (
+            "\n" + sep + "\n"
+            f"TASK : {task_name}\n"
+            f"GOAL : {goal}\n"
+            f"TIME : {self._ts()}\n"
+            + sep + "\n\n"
+        )
+        self._write("info", block)
+        print(f"\n>>> Task: {task_name}")
+        print(f"    Goal: {goal}")
+
+    def log_task_end(self, task_name: str, goal: str, reward: float,
+                     n_correct: int, n_total: int):
+        """Called after a task episode finishes."""
+        import math
+        if math.isnan(reward):
+            sym, label = "⚠", "ERROR"
+        elif reward >= 1.0:
+            sym, label = "✓", "SUCCESS"
+        else:
+            sym, label = "✗", "FAILED"
+
+        pct = (n_correct / n_total * 100) if n_total > 0 else 0.0
+        block = (
+            f"\n{sym} RESULT: {task_name} — {label}\n"
+            f"  Overall so far: {n_correct}/{n_total} ({pct:.1f}%)\n"
+            + "-" * 80 + "\n"
+        )
+        self._write("info", block)
+        print(f"  {sym} {task_name}: {label}  "
+              f"[overall {n_correct}/{n_total} = {pct:.1f}%]")
+
+    def log_summary(self, n_correct: int, n_total: int):
+        """Final summary block at the very end."""
+        pct = (n_correct / n_total * 100) if n_total > 0 else 0.0
+        sep = "=" * 80
+        block = (
+            "\n" + sep + "\n"
+            "FINAL SUMMARY\n"
+            f"  Score : {n_correct}/{n_total} ({pct:.1f}%)\n"
+            f"  Time  : {self._ts()}\n"
+            + sep + "\n"
+        )
+        self._write("info", block)
+
+    # ---- step-level callback (wired to ScalingStrategy._step_logger) ----
+
+    def log_step_candidates(self, candidates, aggregated):
+        """Called by the scaling strategy after scoring candidates.
+
+        Args:
+            candidates: list[CandidateResult] sorted by score descending.
+            aggregated: list[AggregatedCandidate] sorted by total_score desc.
+        """
+        import math
+        self._step += 1
+
+        if not candidates:
+            self._write("info", f"  Step {self._step}: (no candidates)\n")
+            return
+
+        n = len(candidates)
+        ts = self._ts()
+
+        # =====================================================================
+        # INFO level — all candidates + aggregated ranking
+        # =====================================================================
+        info_lines = [f"\n--- Step {self._step}  [{ts}] ---\n"]
+
+        # Individual candidates
+        info_lines.append(f"  Candidates ({n}):\n")
+        for i, c in enumerate(candidates):
+            s = f"{c.score:.0f}" if not math.isnan(c.score) else "n/a"
+            info_lines.append(
+                f"    #{i+1}  score={s}  | {c.action}\n"
+                f"         reason: {c.reason}\n"
+            )
+            if c.justification:
+                info_lines.append(f"         verifier: {c.justification}\n")
+
+        # Aggregated ranking
+        if len(aggregated) > 0 and len(candidates) > 1:
+            info_lines.append(f"  Aggregated ranking ({len(aggregated)} unique actions):\n")
+            for i, a in enumerate(aggregated):
+                ts_str = f"{a.total_score:.0f}" if not math.isnan(a.total_score) else "n/a"
+                info_lines.append(
+                    f"    #{i+1}  total={ts_str} (×{a.count})  | {a.action}\n"
+                )
+
+        # Chosen action
+        best = aggregated[0] if aggregated else None
+        if best:
+            bs = f"{best.total_score:.0f}" if not math.isnan(best.total_score) else "n/a"
+            info_lines.append(f"  → Selected: total={bs} (×{best.count}) | {best.action}\n")
+
+        self._write("info", "".join(info_lines))
+
+        # Print a concise version to stdout
+        if best:
+            bs = f"{best.total_score:.0f}" if not math.isnan(best.total_score) else "n/a"
+            print(f"  Step {self._step} | total={bs} (×{best.count}) | {best.action}")
+
+        # =====================================================================
+        # DEBUG level — add full prompts & raw responses
+        # =====================================================================
+        dbg_lines = []
+        for i, c in enumerate(candidates):
+            s = f"{c.score:.0f}" if not math.isnan(c.score) else "n/a"
+            dbg_lines.append(f"\n  ·· Candidate {i+1}/{n} detail ··\n")
+            if c.actor_prompt:
+                dbg_lines.append(f"  [Actor Prompt]\n{c.actor_prompt}\n")
+            if c.raw_response:
+                dbg_lines.append(f"  [Actor Raw Response]\n{c.raw_response}\n")
+            if c.verifier_response:
+                dbg_lines.append(f"  [Verifier Raw Response]\n{c.verifier_response}\n")
+        dbg_lines.append("\n")
+        self._write("debug", "".join(dbg_lines))
+
+    # ---- summary-step callback (wired to ScalingStrategy._summary_logger) --
+
+    def log_summary_step(self, step_num: int, prompt: str, response: str):
+        """Called after each step's summarisation LLM call.
+
+        Args:
+            step_num: The 1-based step number.
+            prompt:   The summarisation prompt sent to the LLM.
+            response: The summarisation response from the LLM.
+        """
+        # Info: just the summary result
+        info_block = f"  Step {step_num} summary: {response}\n"
+        self._write("info", info_block)
+
+        # Debug: full prompt + result
+        dbg_block = (
+            f"\n  ·· Step {step_num} Summarisation ··\n"
+            f"  [Summary Prompt]\n{prompt}\n"
+            f"  [Summary Response]\n{response}\n\n"
+        )
+        self._write("debug", dbg_block)
 
 
 class GelabWrapper(infer.MultimodalLlmWrapper):
@@ -171,25 +392,23 @@ class GelabWrapper(infer.MultimodalLlmWrapper):
         max_retry: int = 3,
         temperature: float = 0.0,
         max_tokens: int = 2048,
-        simple_logger: Optional[SimpleLogger] = None,
     ):
         """
-        Initialize the wrapper.
+        Initialize the wrapper.  All defaults come from config.yaml via
+        the caller; the parameters here are the *resolved* values.
         
         Args:
             model_name: Model name on the server.
-            config_path: Path to config.yaml with server URL.
+            config_path: Path to config.yaml (used only for server URL).
             max_retry: Maximum retry attempts on failure.
             temperature: Sampling temperature.
             max_tokens: Maximum tokens to generate.
-            simple_logger: Optional simple logger for clean output.
         """
         self.model_name = model_name
         self.config_path = config_path
         self.max_retry = max_retry
         self.temperature = temperature
         self.max_tokens = max_tokens
-        self.simple_logger = simple_logger
         self._client = None
     
     @property
@@ -243,11 +462,6 @@ class GelabWrapper(infer.MultimodalLlmWrapper):
         retry_delay = 1.0
         last_error = None
         
-        # Log request to simple logger
-        if self.simple_logger:
-            num_images = len(images) if images else 0
-            request_summary = f"{num_images} image(s), prompt length: {len(text_prompt)} chars"
-        
         for attempt in range(self.max_retry):
             try:
                 response = await self.client.chat(
@@ -257,30 +471,6 @@ class GelabWrapper(infer.MultimodalLlmWrapper):
                     max_tokens=self.max_tokens,
                     images=images if images else None
                 )
-                
-                # Log response to simple logger
-                if self.simple_logger:
-                    try:
-                        # Try to extract JSON using the same method as M3A
-                        from android_world.agents import agent_utils
-                        extracted_json = agent_utils.extract_json(response)
-                        if extracted_json:
-                            action_type = extracted_json.get("action_type", "unknown")
-                            action_str = f"Action: {action_type}"
-                            if "index" in extracted_json:
-                                action_str += f" (index: {extracted_json['index']})"
-                            if "text" in extracted_json:
-                                action_str += f" (text: {extracted_json['text'][:30]}...)"
-                        else:
-                            action_str = "Failed to extract JSON"
-                    except Exception as e:
-                        action_str = f"Parse error: {str(e)[:50]}"
-                    
-                    self.simple_logger.log_step(
-                        request_summary=request_summary,
-                        response=response,
-                        action=action_str
-                    )
                 
                 # Return (text, is_safe, raw_response)
                 return response, True, {"response": response}
@@ -295,58 +485,31 @@ class GelabWrapper(infer.MultimodalLlmWrapper):
         # All retries failed
         print(f"[GelabWrapper] All retries exhausted. Last error: {last_error}")
         
-        # Log failure
-        if self.simple_logger:
-            self.simple_logger.log_step(
-                request_summary=request_summary,
-                response=f"ERROR: {last_error}",
-                action="FAILED"
-            )
-        
         return infer.ERROR_CALLING_LLM, None, None
 
 # =============================================================================
 # Main
 # =============================================================================
 
-class LoggingM3A(m3a.M3A):
-    """M3A agent with simple logging that tracks task starts."""
-    
-    def __init__(self, env, llm, simple_logger: Optional[SimpleLogger] = None, **kwargs):
-        super().__init__(env, llm, **kwargs)
-        self.simple_logger = simple_logger
-        self.current_goal = None
-        self.step_counter = 0
-    
-    def step(self, goal: str):
-        """Override step to log new tasks."""
-        if self.simple_logger and goal != self.current_goal:
-            # New goal detected - log task start
-            self.current_goal = goal
-            self.step_counter = 0
-            # We don't have the task name here, so just use "Task"
-            self.simple_logger.log_task_start("Current Task", goal)
-        
-        self.step_counter += 1
-        result = super().step(goal)
-        return result
-
-
-
-
 
 def _main() -> None:
     """Run the benchmark."""
+    # ---- resolve config (YAML + CLI overrides) ----
+    cfg = _resolve_config()
+
     print("=" * 60)
-    print("AndroidWorld Benchmark - gelab-zero-4b-preview")
+    print(f"AndroidWorld Benchmark - {cfg.model_name}")
+    print(f"  scaling : {cfg.scaling_strategy}")
+    if cfg.scaling_strategy.lower() == "best_of_n_weighted":
+        print(f"  verifier: {cfg.bon_verifier_model} ({cfg.bon_verifier_backend})")
     print("=" * 60)
     
     # Load and setup environment
     print("\n[1/5] Setting up Android environment...")
     env = env_launcher.load_and_setup_env(
-        console_port=_CONSOLE_PORT.value,
-        emulator_setup=_EMULATOR_SETUP.value,
-        adb_path=_ADB_PATH.value,
+        console_port=cfg.console_port,
+        emulator_setup=cfg.perform_emulator_setup,
+        adb_path=cfg.adb_path,
     )
     print("  ✓ Environment ready")
     
@@ -355,42 +518,82 @@ def _main() -> None:
     task_registry = registry.TaskRegistry()
     suite = suite_utils.create_suite(
         task_registry.get_registry(family=registry.TaskRegistry.ANDROID_WORLD_FAMILY),
-        n_task_combinations=_N_TASK_COMBINATIONS.value,
-        seed=_TASK_RANDOM_SEED.value,
-        tasks=_TASKS.value,
+        n_task_combinations=cfg.n_task_combinations,
+        seed=cfg.task_random_seed,
+        tasks=cfg.tasks,
     )
     suite.suite_family = registry.TaskRegistry.ANDROID_WORLD_FAMILY
     print(f"  ✓ Suite created with {len(suite)} task types")
     
     # Setup checkpoint directory
-    if _CHECKPOINT_DIR.value:
-        checkpoint_dir = _CHECKPOINT_DIR.value
+    if cfg.checkpoint_dir:
+        checkpoint_dir = cfg.checkpoint_dir
     else:
-        checkpoint_dir = checkpointer_lib.create_run_directory(_OUTPUT_PATH.value)
+        checkpoint_dir = checkpointer_lib.create_run_directory(cfg.output_path)
     
     # Create simple logger
     print("\n[3/5] Setting up logging...")
-    simple_log_path = checkpoint_dir + "_simple.log"
+    simple_log_base = checkpoint_dir + "_simple"
     os.makedirs(os.path.dirname(checkpoint_dir) if os.path.dirname(checkpoint_dir) else ".", exist_ok=True)
-    simple_logger = SimpleLogger(simple_log_path)
-    print(f"  ✓ Clean log: {simple_log_path}")
-    print(f"  ✓ Detailed log: {checkpoint_dir}")
+    simple_logger = SimpleLogger(simple_log_base, model_name=cfg.model_name)
+    print(f"  ✓ Info  log: {simple_logger.info_path}")
+    print(f"  ✓ Debug log: {simple_logger.debug_path}")
+    print(f"  ✓ Checkpoint: {checkpoint_dir}")
     
-    # Create agent with Gelab wrapper
+    # Create agent with Gelab wrapper + scaling strategy
     print("\n[4/5] Initializing agent...")
     llm_wrapper = GelabWrapper(
-        model_name=_MODEL_NAME.value,
-        temperature=_TEMPERATURE.value,
-        simple_logger=simple_logger,
+        model_name=cfg.model_name,
+        temperature=cfg.model_temperature,
+        max_tokens=cfg.model_max_tokens,
+        max_retry=cfg.model_max_retry,
     )
-    agent = LoggingM3A(env, llm_wrapper, simple_logger=simple_logger)
-    agent.name = f"m3a_{_MODEL_NAME.value}"
+
+    # Build the appropriate scaling strategy
+    scaling_name = cfg.scaling_strategy.lower()
+    if scaling_name == "baseline":
+        agent = BaselineStrategy(env, llm_wrapper)
+    elif scaling_name == "best_of_n_weighted":
+        agent = BestOfNWeightedStrategy(
+            env,
+            actor_llm=llm_wrapper,
+            n_samples=cfg.bon_n_samples,
+            actor_temperature=cfg.bon_actor_temperature,
+            verifier_model=cfg.bon_verifier_model,
+            verifier_backend=cfg.bon_verifier_backend,
+            qwen_api_key=cfg.qwen_api_key,
+            qwen_base_url=cfg.qwen_base_url,
+        )
+    else:
+        raise ValueError(f"Unknown scaling strategy: {scaling_name}")
+
+    agent.name = f"{scaling_name}_{cfg.model_name}"
     agent.transition_pause = None  # Use auto mode
+    # Wire step-level logger
+    agent._step_logger = simple_logger.log_step_candidates
+    # Wire summary-step logger
+    agent._summary_logger = simple_logger.log_summary_step
+    print(f"  ✓ Strategy: {scaling_name}")
     print(f"  ✓ Agent ready: {agent.name}")
     
     print(f"\n[5/5] Running benchmark...")
     print(f"  Output: {checkpoint_dir}")
     
+    # Track running totals for the final summary
+    _final_correct = 0
+    _final_total = 0
+
+    def _on_task_start(task_name: str, goal: str):
+        simple_logger.log_task_start(task_name, goal)
+
+    def _on_task_end(task_name: str, goal: str, reward: float,
+                     n_correct: int, n_total: int):
+        nonlocal _final_correct, _final_total
+        _final_correct = n_correct
+        _final_total = n_total
+        simple_logger.log_task_end(task_name, goal, reward,
+                                   n_correct, n_total)
+
     # Run benchmark
     try:
         results = suite_utils.run(
@@ -398,11 +601,17 @@ def _main() -> None:
             agent,
             checkpointer=checkpointer_lib.IncrementalCheckpointer(checkpoint_dir),
             demo_mode=False,
+            on_task_start=_on_task_start,
+            on_task_end=_on_task_end,
         )
+        simple_logger.log_summary(_final_correct, _final_total)
         print("\n" + "=" * 60)
         print("Benchmark completed successfully!")
+        pct = (_final_correct / _final_total * 100) if _final_total > 0 else 0.0
+        print(f"  Final score: {_final_correct}/{_final_total} ({pct:.1f}%)")
         print(f"Detailed results: {checkpoint_dir}")
-        print(f"Clean log: {simple_log_path}")
+        print(f"Info  log: {simple_logger.info_path}")
+        print(f"Debug log: {simple_logger.debug_path}")
         print("=" * 60)
     finally:
         env.close()

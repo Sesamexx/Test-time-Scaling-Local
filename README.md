@@ -14,27 +14,46 @@ Prerequisite:
 # Run the emulator
 bat\launch_emulator.bat
 # Connect to server with ssh
-ssh -L 9000:localhost:80 ubuntu@$SERVER_IP
+bat\start_ssh_tunnel.bat
 # Activate environment
 conda activate $ENV_NAME
 # First run
 python run_benchmark.py --perform_emulator_setup
 # Subsequent runs
 python run_benchmark.py
-# Or run specific tasks
-python run_benchmark.py --tasks=ContactsAddContact,ClockStopWatch
 ```
 
 Results are saved to `~/android_world/runs/` by default.
 
 ## Configuration
 
-Edit `config.yaml` to change server URL and timeout:
+Edit `config.yaml` to change the scaling technique and the corresponding parameters. For example, if we want to run the baseline (only gelab-zero-4b-preview):
 
 ```yaml
 server:
   url: "http://localhost:9000"
   timeout: 300.0
+
+model:
+  name: "gelab-zero-4b-preview"
+  temperature: 0.5
+  max_tokens: 512
+  max_retry: 3
+
+benchmark:
+  adb_path: "%LOCALAPPDATA%\\Android\\Sdk\\platform-tools\\adb.exe"
+  console_port: 5554
+  perform_emulator_setup: false
+  n_task_combinations: 1
+  task_random_seed: 30
+  output_path: "~/android_world/runs"
+  checkpoint_dir: ""
+  tasks: null
+
+scaling:
+  strategy: "baseline"
+  best_of_n_weighted:
+    # ........
 ```
 
 ## Client Usage

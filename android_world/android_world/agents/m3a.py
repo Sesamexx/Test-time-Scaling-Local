@@ -75,6 +75,26 @@ PROMPT_PREFIX = (
     '- Open an app (nothing will happen if the app is not'
     ' installed): `{{"action_type": "open_app", "app_name": <name>}}`\n'
     '- Wait for the screen to update: `{{"action_type": "wait"}}`\n'
+    # Added: explicit valid/invalid action reference to reduce model errors
+    '**You should use the exact keys, otherwise the action is not valid.**\n'
+    'All valid action types:\n'
+    'Valid 1. `{{"action_type": "status", "goal_status": "complete"}}`\n'
+    'Valid 2. `{{"action_type": "status", "goal_status": "infeasible"}}`\n'
+    'Valid 3. `{{"action_type": "answer", "text": "<answer_text>"}}`\n'
+    'Valid 4. `{{"action_type": "click", "index": <target_index>}}`\n'
+    'Valid 5. `{{"action_type": "long_press", "index": <target_index>}}`\n'
+    'Valid 6. `{{"action_type": "input_text", "text": <text_input>, "index": <target_index>}}`\n'
+    'Valid 7. `{{"action_type": "keyboard_enter"}}`\n'
+    'Valid 8. `{{"action_type": "navigate_home"}}`\n'
+    'Valid 9. `{{"action_type": "navigate_back"}}`\n'
+    'Valid 10. `{{"action_type": "scroll", "direction": <up, down, left, right>, "index": <optional_target_index>}}`\n'
+    'Valid 11. `{{"action_type": "open_app", "app_name": <name>}}`\n'
+    'Valid 12. `{{"action_type": "wait"}}`\n'
+    'Examples of invalid actions:\n'
+    'Invalid 1. `{{"action_type": "click", "point": [<x>, <y>]}}` Reason: should use "index" instead of "point".\n'
+    'Invalid 2. `{{"action_type": "click", "element_index": <target_index>}}` Reason: should use "index" instead of "element_index".\n'
+    'Invalid 3. `{{"action_type": "input_text", "text": <text_input>}}` Reason: missing "index".\n'
+    'Invalid 4. `{{"action_type": "long_press", "element_index": <target_index>}}` Reason: should use "index" instead of "element_index".\n'
 )
 
 
@@ -148,26 +168,6 @@ GUIDANCE = (
 )
 
 
-# ACTION_SELECTION_PROMPT_TEMPLATE = (
-#     PROMPT_PREFIX
-#     + '\nThe current user goal/request is: {goal}\n\n'
-#     'Here is a history of what you have done so far:\n{history}\n\n'
-#     'The current screenshot and the same screenshot with bounding boxes'
-#     ' and labels added are also given to you.\n'
-#     'Here is a list of detailed'
-#     ' information for some of the UI elements (notice that some elements in'
-#     ' this list may not be visible in the current screen and so you can not'
-#     ' interact with it, can try to scroll the screen to reveal it first),'
-#     ' the numeric indexes are'
-#     ' consistent with the ones in the labeled screenshot:\n{ui_elements}\n'
-#     + GUIDANCE
-#     + '{additional_guidelines}'
-#     + '\nNow output an action from the above list in the correct JSON format,'
-#     ' following the reason why you do that. Your answer should look like:\n'
-#     'Reason: ...\nAction: {{"action_type":...}}\n\n'
-#     'Your Answer:\n'
-# )
-
 ACTION_SELECTION_PROMPT_TEMPLATE = (
     PROMPT_PREFIX
     + '\nThe current user goal/request is: {goal}\n\n'
@@ -182,12 +182,6 @@ ACTION_SELECTION_PROMPT_TEMPLATE = (
     ' consistent with the ones in the labeled screenshot:\n{ui_elements}\n'
     + GUIDANCE
     + '{additional_guidelines}'
-    + '\nNow output an action from the above list in the correct JSON format,'
-    ' following the reason why you do that. Your answer should look like:\n'
-    'Reason: ...\nAction: {{"action_type":...}}\n'
-    + '\nNow output an action from the above list in the correct JSON format,'
-    ' following the reason why you do that. Your answer should look like:\n'
-    'Reason: ...\nAction: {{"action_type":...}}\n'
     + '\nNow output an action from the above list in the correct JSON format,'
     ' following the reason why you do that. Your answer should look like:\n'
     'Reason: ...\nAction: {{"action_type":...}}\n\n'

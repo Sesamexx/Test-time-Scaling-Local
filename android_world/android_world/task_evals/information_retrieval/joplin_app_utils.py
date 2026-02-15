@@ -14,6 +14,7 @@
 
 """Utils for Joplin app."""
 
+import logging
 import os
 import random
 
@@ -74,12 +75,17 @@ def clear_dbs(env: interface.AsyncEnv) -> None:
   sqlite_utils.delete_all_rows_from_table(
       _NOTES_TABLE, _DB_PATH, env, _APP_NAME
   )
-  # Skip clearing notes_normalized as it's an FTS4 virtual table that requires
-  # the FTS4 module. When notes table is cleared, the FTS index will be
-  # automatically updated by the Joplin app triggers.
-  # sqlite_utils.delete_all_rows_from_table(
-  #     _NOTES_NORMALIZED_TABLE, _DB_PATH, env, _APP_NAME
-  # )
+  # notes_normalized is an FTS4 virtual table; skip on platforms where
+  # SQLite is compiled without FTS support (e.g. stock Windows Python).
+  try:
+    sqlite_utils.delete_all_rows_from_table(
+        _NOTES_NORMALIZED_TABLE, _DB_PATH, env, _APP_NAME
+    )
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    logging.warning(
+        'Skipping clear of %s (likely FTS not supported): %s',
+        _NOTES_NORMALIZED_TABLE, e,
+    )
   adb_utils.close_app(_APP_NAME, env.controller)  # Register changes.
 
 
@@ -167,15 +173,22 @@ def add_notes(
       _APP_NAME,
       env,
   )
-  # Skip inserting into notes_normalized (FTS4 virtual table) - it's auto-populated by triggers
-  # sqlite_utils.insert_rows_to_remote_db(
-  #     _normalize_notes(rows),
-  #     None,
-  #     _NOTES_NORMALIZED_TABLE,
-  #     _DB_PATH,
-  #     _APP_NAME,
-  #     env,
-  # )
+  # notes_normalized is an FTS4 virtual table; skip on platforms where
+  # SQLite is compiled without FTS support (e.g. stock Windows Python).
+  try:
+    sqlite_utils.insert_rows_to_remote_db(
+        _normalize_notes(rows),
+        None,
+        _NOTES_NORMALIZED_TABLE,
+        _DB_PATH,
+        _APP_NAME,
+        env,
+    )
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    logging.warning(
+        'Skipping insert into %s (likely FTS not supported): %s',
+        _NOTES_NORMALIZED_TABLE, e,
+    )
 
 
 def _normalize_notes(

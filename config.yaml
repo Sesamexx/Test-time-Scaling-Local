@@ -1,12 +1,53 @@
 # =============================================================================
-# Client Configuration
+# config.yaml
+# Created:  [Lc-v0.0.1] 2026-02-03
+# Updated:  [Lc-v0.0.3] 2026-02-12 Add OpenAI-compatible verifier backend
 # =============================================================================
 
+# Server connection
 server:
   # Remote server URL - using SSH tunnel to localhost
   # Run: ssh -L 9000:localhost:80 ubuntu@<SERVER_IP>
   url: "http://localhost:9000"
   # url: "http://<SERVER_IP>:80"
-  
+
   # Request timeout in seconds
   timeout: 300.0
+
+# Actor model (gelab-zero-4b-preview by default)
+model:
+  name: "gelab-zero-4b-preview"
+  temperature: 0.5
+  max_tokens: 512
+  max_retry: 3
+
+# Benchmark / environment
+benchmark:
+  adb_path: "%LOCALAPPDATA%\\Android\\Sdk\\platform-tools\\adb.exe"
+  console_port: 5554
+  perform_emulator_setup: false
+  n_task_combinations: 1
+  task_random_seed: 30
+  output_path: "~/android_world/runs"
+  # Leave empty to auto-create; set a path to resume from checkpoint
+  checkpoint_dir: ""
+  # List of specific tasks (null = run all)
+  tasks: null
+  # tasks: [ContactsAddContact]
+
+# Test-time scaling
+scaling:
+  # Strategy name: "baseline" | "best_of_n_weighted"
+  strategy: "best_of_n_weighted"
+
+  # -- best_of_n_weighted settings --
+  best_of_n_weighted:
+    n_samples: 4
+    actor_temperature: 0.5
+    verifier_model: "Qwen3-VL-30B-A3B-Instruct"
+
+    # Verifier backend:
+    #   "local"              - use the same LLMClient (local/SSH server)
+    #   "openai_compatible"  - use OpenAI-compatible API (reads .env for
+    #                          QWEN_API_KEY and QWEN_BASE_URL)
+    verifier_backend: "openai_compatible"

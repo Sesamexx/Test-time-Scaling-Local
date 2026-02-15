@@ -250,23 +250,24 @@ def encode_image_for_html(image: np.ndarray) -> str:
   ).decode('utf-8')
 
 
-def _sanitize_for_json(obj):
-  """Recursively sanitize objects for JSON serialization.
-  
+def _sanitize_for_json(obj: Any) -> Any:
+  """Recursively sanitize an object for JSON serialization.
+
+  Handles Python Ellipsis (...) which some LLMs output in JSON-like responses.
+
   Args:
-    obj: Object to sanitize (dict, list, or primitive).
-    
+    obj: Object to sanitize.
+
   Returns:
-    JSON-serializable version of the object.
+    Sanitized object safe for json.dumps().
   """
-  if obj is ...:  # Ellipsis object
-    return None  # Convert to null in JSON
-  elif isinstance(obj, dict):
+  if obj is ...:
+    return None
+  if isinstance(obj, dict):
     return {k: _sanitize_for_json(v) for k, v in obj.items()}
-  elif isinstance(obj, (list, tuple)):
-    return [_sanitize_for_json(item) for item in obj]
-  else:
-    return obj
+  if isinstance(obj, (list, tuple)):
+    return [_sanitize_for_json(v) for v in obj]
+  return obj
 
 
 def parse_reason_action_output(
@@ -292,9 +293,7 @@ def parse_reason_action_output(
   if action:
     extracted = extract_json(action)
     if extracted is not None:
-      # Sanitize extracted data to handle non-JSON-serializable Python objects
-      sanitized = _sanitize_for_json(extracted)
-      action = json.dumps(sanitized)
+      action = json.dumps(_sanitize_for_json(extracted))
 
   return reason, action
 

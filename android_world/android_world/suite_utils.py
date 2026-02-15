@@ -20,6 +20,7 @@ import hashlib
 import logging
 import os
 import random
+import sys
 import time
 import traceback
 from typing import Any, Callable, Type, TypeVar
@@ -36,6 +37,17 @@ from android_world.task_evals.miniwob import miniwob_base
 from fuzzywuzzy import process
 import numpy as np
 import pandas as pd
+
+# Fix for Windows console encoding - ensure UTF-8 for emoji support
+if sys.platform == 'win32' and sys.stdout.encoding != 'utf-8':
+  try:
+    sys.stdout.reconfigure(encoding='utf-8')
+    sys.stderr.reconfigure(encoding='utf-8')
+  except AttributeError:
+    # Python < 3.7 fallback
+    import codecs
+    sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, 'strict')
+    sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer, 'strict')
 
 # A fixed seed to use when use identical parameters but seed is not set.
 _FIXED_SEED = 123
@@ -72,7 +84,10 @@ class Suite(dict[str, list[task_eval.TaskEval]]):
 def _log_and_print(msg: str, *args: object) -> None:
   formatted = msg % args if args else msg
   logging.info(formatted)
-  print(formatted)
+  try:
+    print(formatted)
+  except UnicodeEncodeError:
+    print(formatted.encode('utf-8', errors='replace').decode('utf-8'))
 
 
 def _instantiate_task(
@@ -225,6 +240,8 @@ def _run_task(
     run_episode: Callable[[TaskEvalType], episode_runner.EpisodeResult],
     env: interface.AsyncEnv,
     demo_mode: bool,
+    on_task_start: Callable[[str, str], None] | None = None,
+    on_task_end: Callable[[str, str, float, int, int], None] | None = None,
 ) -> dict[str, Any]:
   """Runs a task.
 
@@ -233,6 +250,11 @@ def _run_task(
     run_episode: Runs the agent on the task.
     env: Environment that will be run on.
     demo_mode: Whether running in demo mode; will display success overlay if so.
+    on_task_start: Optional callback(task_name, goal) fired before the episode.
+    on_task_end: Optional callback(task_name, goal, reward, n_correct, n_total)
+      fired after the episode.  n_correct/n_total are set by the caller
+      (_run_task_suite) after this function returns, so this function only
+      supplies the per-task reward; the caller wraps it.
 
   Returns:
     Episode data and associated success signals.
@@ -240,6 +262,9 @@ def _run_task(
   Raises:
     ValueError: If step data was not as expected.
   """
+  if on_task_start is not None:
+    on_task_start(task.name, task.goal)
+
   start = time.time()
   try:
     task.initialize_task(env)
@@ -326,6 +351,8 @@ def _run_task_suite(
     return_full_episode_data: bool = False,
     process_episodes_fn=None,
     check_episode_fn: Callable[[dict[str, Any]], bool] | None = None,
+    on_task_start: Callable[[str, str], None] | None = None,
+    on_task_end: Callable[[str, str, float, int, int], None] | None = None,
 ) -> list[dict[str, Any]]:
   """Runs e2e system on suite.
 
@@ -341,6 +368,9 @@ def _run_task_suite(
     process_episodes_fn: The function to process episode data. Usually to
       compute metrics. Deafaults to process_episodes from this file.
     check_episode_fn: The function to check episode data.
+    on_task_start: Optional callback(task_name, goal) before each task.
+    on_task_end: Optional callback(task_name, goal, reward, n_correct, n_total)
+      after each task finishes (including exceptions).
 
   Returns:
     Metadata for each episode, including the scripted reward.
@@ -391,7 +421,10 @@ def _run_task_suite(
         _log_and_print('Skipping already processed task %s', instance_name)
         continue
 
-      episode = _run_task(instance, run_episode, env, demo_mode=demo_mode)
+      episode = _run_task(
+          instance, run_episode, env, demo_mode=demo_mode,
+          on_task_start=on_task_start,
+      )
       if (
           episode.get(constants.EpisodeConstants.EXCEPTION_INFO) is None
           and check_episode_fn is not None
@@ -410,9 +443,18 @@ def _run_task_suite(
 
       if episode[constants.EpisodeConstants.EXCEPTION_INFO] is not None:
         # Don't include episode in tally if execution/eval logic errored out.
+        if on_task_end is not None:
+          on_task_end(instance.name, instance.goal, float('nan'),
+                      correct, total)
         continue
       correct += episode[constants.EpisodeConstants.IS_SUCCESSFUL]
       total += 1
+      if on_task_end is not None:
+        on_task_end(
+            instance.name, instance.goal,
+            episode[constants.EpisodeConstants.IS_SUCCESSFUL],
+            correct, total,
+        )
       if demo_mode:
         _update_scoreboard(correct, total, env.controller)
     print()
@@ -428,6 +470,8 @@ def run(
     return_full_episode_data: bool = False,
     process_episodes_fn=None,
     check_episode_fn: Callable[[dict[str, Any]], bool] | None = None,
+    on_task_start: Callable[[str, str], None] | None = None,
+    on_task_end: Callable[[str, str, float, int, int], None] | None = None,
 ) -> list[dict[str, Any]]:
   """Create suite and runs eval suite.
 
@@ -445,6 +489,10 @@ def run(
     process_episodes_fn: The function to process episode data. Usually to
       compute metrics. Deafaults to process_episodes from this file.
     check_episode_fn: The function to check episode data.
+    on_task_start: Optional callback invoked before each task runs.
+      Signature: (task_name, goal) -> None.
+    on_task_end: Optional callback invoked after each task completes.
+      Signature: (task_name, goal, reward, n_correct, n_total) -> None.
 
   Returns:
     Step-by-step data from each episode.
@@ -483,6 +531,8 @@ def run(
       return_full_episode_data=return_full_episode_data,
       process_episodes_fn=process_episodes_fn,
       check_episode_fn=check_episode_fn,
+      on_task_start=on_task_start,
+      on_task_end=on_task_end,
   )
 
   return results

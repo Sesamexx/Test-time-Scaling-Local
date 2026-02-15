@@ -160,40 +160,34 @@ def delete_all_rows_from_table(
 
     conn = sqlite3.connect(local_db_path)
     cursor = conn.cursor()
-    
-    # Windows Python SQLite doesn't include FTS3/FTS4/FTS5 modules
-    # Temporarily drop FTS triggers to allow DELETE operations
+
+    # Windows Python SQLite doesn't include FTS3/FTS4/FTS5 modules.
+    # Temporarily drop FTS triggers to allow DELETE operations.
     fts_triggers_to_restore = []
     try:
       cursor.execute(
           "SELECT name, sql FROM sqlite_master WHERE type='trigger'"
       )
       all_triggers = cursor.fetchall()
-      
-      # Find and drop FTS-related triggers
       for trigger_name, trigger_sql in all_triggers:
         if trigger_sql and 'fts' in trigger_sql.lower():
           fts_triggers_to_restore.append((trigger_name, trigger_sql))
           cursor.execute(f"DROP TRIGGER IF EXISTS {trigger_name}")
-      
       conn.commit()
-    except Exception as e:
-      # If trigger manipulation fails, proceed anyway
+    except Exception as e:  # pylint: disable=broad-exception-caught
       print(f"Warning: Could not drop FTS triggers: {e}")
-    
-    # Delete rows without FTS triggers interfering
+
     delete_command = f"DELETE FROM {table_name}"
     cursor.execute(delete_command)
     conn.commit()
-    
-    # Restore FTS triggers (maintaining DB schema)
+
+    # Restore FTS triggers (maintaining DB schema for the device).
     for trigger_name, trigger_sql in fts_triggers_to_restore:
       try:
         cursor.execute(trigger_sql)
       except sqlite3.OperationalError:
-        # Expected to fail on Windows due to missing FTS module
-        pass
-    
+        pass  # Expected on Windows due to missing FTS module.
+
     conn.commit()
     conn.close()
     env.controller.push_file(local_db_path, remote_db_file_path, timeout_sec)
@@ -232,46 +226,37 @@ def insert_rows_to_remote_db(
 
     conn = sqlite3.connect(local_db_path)
     cursor = conn.cursor()
-    
-    # Windows Python SQLite doesn't include FTS3/FTS4/FTS5 modules
-    # If the database has FTS triggers, they will fail during INSERT
-    # We need to detect and temporarily drop/recreate FTS triggers
+
+    # Windows Python SQLite doesn't include FTS3/FTS4/FTS5 modules.
+    # Temporarily drop FTS triggers to allow INSERT operations.
     fts_triggers_to_restore = []
     try:
       cursor.execute(
           "SELECT name, sql FROM sqlite_master WHERE type='trigger'"
       )
       all_triggers = cursor.fetchall()
-      
-      # Find and drop FTS-related triggers
       for trigger_name, trigger_sql in all_triggers:
         if trigger_sql and 'fts' in trigger_sql.lower():
           fts_triggers_to_restore.append((trigger_name, trigger_sql))
           cursor.execute(f"DROP TRIGGER IF EXISTS {trigger_name}")
-      
       conn.commit()
-    except Exception as e:
-      # If trigger manipulation fails, proceed anyway
+    except Exception as e:  # pylint: disable=broad-exception-caught
       print(f"Warning: Could not drop FTS triggers: {e}")
-    
-    # Insert rows without FTS triggers interfering
+
     for row in rows:
       insert_command, values = sqlite_schema_utils.insert_into_db(
           row, table_name, exclude_key
       )
       cursor.execute(insert_command, values)
-    
     conn.commit()
-    
-    # Restore FTS triggers (even though they won't work, maintaining DB schema)
+
+    # Restore FTS triggers (maintaining DB schema for the device).
     for trigger_name, trigger_sql in fts_triggers_to_restore:
       try:
         cursor.execute(trigger_sql)
       except sqlite3.OperationalError:
-        # Expected to fail on Windows due to missing FTS module
-        # But the trigger definition is restored to the schema
-        pass
-    
+        pass  # Expected on Windows due to missing FTS module.
+
     conn.commit()
     conn.close()
 
