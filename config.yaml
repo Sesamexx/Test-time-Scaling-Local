@@ -1,7 +1,7 @@
 # =============================================================================
 # config.yaml
 # Created:  [Lc-v0.0.1] 2026-02-03
-# Updated:  [Lc-v0.0.3] 2026-02-12 Add OpenAI-compatible verifier backend
+# Updated:  [Lc-v0.0.4] 2026-02-16 Add strategy config
 # =============================================================================
 
 # Server connection
@@ -17,7 +17,7 @@ server:
 # Actor model (gelab-zero-4b-preview by default)
 model:
   name: "gelab-zero-4b-preview"
-  temperature: 0.5
+  temperature: 0.7
   max_tokens: 512
   max_retry: 3
 
@@ -32,22 +32,42 @@ benchmark:
   # Leave empty to auto-create; set a path to resume from checkpoint
   checkpoint_dir: ""
   # List of specific tasks (null = run all)
-  tasks: null
-  # tasks: [ContactsAddContact]
+  # tasks: null
+  # tasks: [AudioRecorderRecordAudio,ContactsAddContact,CameraTakePhoto,ClockStopWatchPausedVerify,ContactsAddContact,ExpenseAddSingle,FilesMoveFile,MarkorChangeNoteContent,MarkorCreateNoteFromClipboard,NotesIsTodo,OpenAppTaskEval,RecipeDeleteSingleRecipe,RetroPlayingQueue,SimpleCalendarAddOneEventTomorrow,SimpleSmsReply,SportsTrackerActivitiesCountForWeek,SystemBluetoothTurnOff,TasksDueOnDate,TurnOnWifiAndOpenApp,VlcCreatePlaylist]
+  tasks: [ClockStopWatchPausedVerify,RecipeDeleteMultipleRecipesWithNoise,ContactsNewContactDraft,ClockTimerEntry,SimpleSmsSend,SimpleSmsSendClipboardContent,MarkorDeleteNote,TasksIncompleteTasksOnDate,SimpleSmsReply,SystemBluetoothTurnOffVerify,SystemCopyToClipboard,SportsTrackerTotalDistanceForCategoryOverInterval,SystemWifiTurnOnVerify,VlcCreatePlaylist,SystemBrightnessMinVerify,CameraTakePhoto,SystemWifiTurnOffVerify,CameraTakeVideo,SimpleCalendarDeleteEvents,NotesMeetingAttendeeCount,FilesMoveFile,SimpleCalendarAnyEventsOnDate,SimpleCalendarAddOneEventTomorrow,RecipeDeleteSingleWithRecipeWithNoise,SystemWifiTurnOn]
 
 # Test-time scaling
 scaling:
-  # Strategy name: "baseline" | "best_of_n_weighted"
-  strategy: "best_of_n_weighted"
+  # Strategy name: "baseline" | "best_of_n_weighted" | "pts_agent"
+  strategy: "pts_agent"
 
   # -- best_of_n_weighted settings --
   best_of_n_weighted:
     n_samples: 4
-    actor_temperature: 0.5
+    actor_temperature: 0.7
     verifier_model: "Qwen3-VL-30B-A3B-Instruct"
 
     # Verifier backend:
     #   "local"              - use the same LLMClient (local/SSH server)
     #   "openai_compatible"  - use OpenAI-compatible API (reads .env for
     #                          QWEN_API_KEY and QWEN_BASE_URL)
+    verifier_backend: "openai_compatible"
+
+  # -- pts_agent settings (Planner-Translator-Summarizer) --
+  pts_agent:
+    # Planner: best-of-N selection
+    planner_n: 2           # N candidate plans to generate
+    planner_m: 1           # best m plans selected by verifier
+    planner_temperature: 0.7
+
+    # Translator: best-of-N weighted
+    translator_n: 2        # N candidate actions to generate
+    translator_temperature: 0.7
+
+    # Summarizer: best-of-N selection
+    summarizer_n: 2        # N candidate summaries to generate
+    summarizer_temperature: 0.7
+
+    # Shared verifier
+    verifier_model: "Qwen3-VL-30B-A3B-Instruct"
     verifier_backend: "openai_compatible"

@@ -1,8 +1,7 @@
 # =============================================================================
 # run_benchmark.py
 # Created:  [Lc-v0.0.2] 2026-02-04
-# Updated:  [Lc-v0.0.3] 2026-02-10 Add scaling strategy system;
-#           Centralise all config in config.yaml
+# Updated:  [Lc-v0.0.4] 2026-02-16 Add scaling strategies
 # =============================================================================
 """
 Run AndroidWorld benchmark with gelab-zero-4b-preview model.
@@ -31,7 +30,7 @@ from typing import Any, Optional
 import numpy as np
 
 # ---------------------------------------------------------------------------
-# Force UTF-8 on Windows so emoji characters (✓, ✗, →, etc.) don't crash
+# Force UTF-8 on Windows
 # ---------------------------------------------------------------------------
 if sys.platform == "win32":
     for _stream_name in ("stdout", "stderr"):
@@ -68,7 +67,7 @@ from android_world.env import env_launcher
 from client import get_client, AppConfig
 
 # Scaling strategies
-from scaling import BaselineStrategy, BestOfNWeightedStrategy
+from scaling import BaselineStrategy, BestOfNWeightedStrategy, PlannerTranslatorSummarizerStrategy
 
 logging.set_verbosity(logging.INFO)
 
@@ -140,6 +139,18 @@ _VERIFIER_BACKEND = flags.DEFINE_string(
     'verifier_backend', None,
     'Override: verifier backend ("local" | "openai_compatible").',
 )
+_PLANNER_N = flags.DEFINE_integer(
+    'planner_n', None,
+    'Override: number of candidate plans for PTS planner.',
+)
+_TRANSLATOR_N = flags.DEFINE_integer(
+    'translator_n', None,
+    'Override: number of candidate actions for PTS translator.',
+)
+_SUMMARIZER_N = flags.DEFINE_integer(
+    'summarizer_n', None,
+    'Override: number of candidate summaries for PTS summarizer.',
+)
 
 
 def _resolve_config() -> AppConfig:
@@ -176,6 +187,12 @@ def _resolve_config() -> AppConfig:
         cfg.bon_verifier_model = _VERIFIER_MODEL.value
     if _VERIFIER_BACKEND.value is not None:
         cfg.bon_verifier_backend = _VERIFIER_BACKEND.value
+    if _PLANNER_N.value is not None:
+        cfg.pts_planner_n = _PLANNER_N.value
+    if _TRANSLATOR_N.value is not None:
+        cfg.pts_translator_n = _TRANSLATOR_N.value
+    if _SUMMARIZER_N.value is not None:
+        cfg.pts_summarizer_n = _SUMMARIZER_N.value
 
     return cfg
 
@@ -186,9 +203,9 @@ def _resolve_config() -> AppConfig:
 class SimpleLogger:
     """Two-level human-readable logger (info + debug).
 
-    * **info** log  – all candidates with their scores, aggregated ranking,
+    * info log  - all candidates with their scores, aggregated ranking,
       and summarisation results.
-    * **debug** log – everything in info PLUS full actor prompts, raw LLM
+    * debug log - everything in info PLUS full actor prompts, raw LLM
       responses, and verifier raw responses.
 
     Both files are plain-text; the info log is also echoed to stdout.
@@ -296,34 +313,33 @@ class SimpleLogger:
             aggregated: list[AggregatedCandidate] sorted by total_score desc.
         """
         import math
-        self._step += 1
 
         if not candidates:
-            self._write("info", f"  Step {self._step}: (no candidates)\n")
+            self._write("info", f"  [Translator] (no candidates)\n")
             return
 
         n = len(candidates)
-        ts = self._ts()
 
         # =====================================================================
-        # INFO level — all candidates + aggregated ranking
+        # INFO level — all candidates + verifier response + aggregated ranking
         # =====================================================================
-        info_lines = [f"\n--- Step {self._step}  [{ts}] ---\n"]
+        info_lines = [f"  [Translator] Candidates ({n}):\n"]
 
         # Individual candidates
-        info_lines.append(f"  Candidates ({n}):\n")
         for i, c in enumerate(candidates):
             s = f"{c.score:.0f}" if not math.isnan(c.score) else "n/a"
             info_lines.append(
                 f"    #{i+1}  score={s}  | {c.action}\n"
-                f"         reason: {c.reason}\n"
             )
-            if c.justification:
-                info_lines.append(f"         verifier: {c.justification}\n")
+            # Show verifier response for every candidate
+            if c.verifier_response:
+                info_lines.append(
+                    f"         verifier: {c.verifier_response}\n"
+                )
 
         # Aggregated ranking
         if len(aggregated) > 0 and len(candidates) > 1:
-            info_lines.append(f"  Aggregated ranking ({len(aggregated)} unique actions):\n")
+            info_lines.append(f"  [Translator] Aggregated ranking ({len(aggregated)} unique actions):\n")
             for i, a in enumerate(aggregated):
                 ts_str = f"{a.total_score:.0f}" if not math.isnan(a.total_score) else "n/a"
                 info_lines.append(
@@ -334,7 +350,7 @@ class SimpleLogger:
         best = aggregated[0] if aggregated else None
         if best:
             bs = f"{best.total_score:.0f}" if not math.isnan(best.total_score) else "n/a"
-            info_lines.append(f"  → Selected: total={bs} (×{best.count}) | {best.action}\n")
+            info_lines.append(f"  [Translator] → Selected: total={bs} (×{best.count}) | {best.action}\n")
 
         self._write("info", "".join(info_lines))
 
@@ -349,7 +365,7 @@ class SimpleLogger:
         dbg_lines = []
         for i, c in enumerate(candidates):
             s = f"{c.score:.0f}" if not math.isnan(c.score) else "n/a"
-            dbg_lines.append(f"\n  ·· Candidate {i+1}/{n} detail ··\n")
+            dbg_lines.append(f"\n  ·· Translator Candidate {i+1}/{n} detail ··\n")
             if c.actor_prompt:
                 dbg_lines.append(f"  [Actor Prompt]\n{c.actor_prompt}\n")
             if c.raw_response:
@@ -369,17 +385,66 @@ class SimpleLogger:
             prompt:   The summarisation prompt sent to the LLM.
             response: The summarisation response from the LLM.
         """
-        # Info: just the summary result
-        info_block = f"  Step {step_num} summary: {response}\n"
+        # Info: just the summary result (the detailed candidates are
+        # logged by log_summarizer_candidates)
+        info_block = f"  [Summary] Final: {response}\n"
         self._write("info", info_block)
 
         # Debug: full prompt + result
         dbg_block = (
-            f"\n  ·· Step {step_num} Summarisation ··\n"
+            f"\n  ·· Summarisation detail ··\n"
             f"  [Summary Prompt]\n{prompt}\n"
             f"  [Summary Response]\n{response}\n\n"
         )
         self._write("debug", dbg_block)
+
+    # ---- planner-phase callback (wired to ScalingStrategy._planner_logger) --
+
+    def log_planner_candidates(self, candidates, selected_indices, verifier_response):
+        """Called by the planner after selecting best plan(s).
+
+        Args:
+            candidates:        list[str] — all candidate plans generated.
+            selected_indices:  list[int] — 0-based indices of selected plans.
+            verifier_response: str — raw verifier response text.
+        """
+        self._step += 1
+        n = len(candidates)
+        ts = self._ts()
+
+        info_lines = [f"\n--- Step {self._step}  [{ts}] ---\n"]
+        info_lines.append(f"  [Planner] Candidates ({n}):\n")
+        for i, plan in enumerate(candidates):
+            marker = " ★" if i in selected_indices else ""
+            info_lines.append(f"    Plan #{i+1}{marker}:\n")
+            for line in plan.splitlines():
+                info_lines.append(f"      {line}\n")
+        info_lines.append(f"  [Planner] Verifier response: {verifier_response}\n")
+        sel_nums = ", ".join(str(i + 1) for i in selected_indices)
+        info_lines.append(f"  [Planner] → Selected plan(s): {sel_nums}\n")
+
+        self._write("info", "".join(info_lines))
+
+    # ---- summarizer-phase callback (wired to ScalingStrategy._summarizer_logger) --
+
+    def log_summarizer_candidates(self, candidates, selected_index, verifier_response):
+        """Called by the summarizer after selecting best summary.
+
+        Args:
+            candidates:        list[str] — all candidate summaries generated.
+            selected_index:    int — 0-based index of the selected summary.
+            verifier_response: str — raw verifier response text.
+        """
+        n = len(candidates)
+
+        info_lines = [f"  [Summarizer] Candidates ({n}):\n"]
+        for i, summary in enumerate(candidates):
+            marker = " ★" if i == selected_index else ""
+            info_lines.append(f"    Summary #{i+1}{marker}: {summary}\n")
+        info_lines.append(f"  [Summarizer] Verifier response: {verifier_response}\n")
+        info_lines.append(f"  [Summarizer] → Selected summary: #{selected_index + 1}\n")
+
+        self._write("info", "".join(info_lines))
 
 
 class GelabWrapper(infer.MultimodalLlmWrapper):
@@ -502,6 +567,11 @@ def _main() -> None:
     print(f"  scaling : {cfg.scaling_strategy}")
     if cfg.scaling_strategy.lower() == "best_of_n_weighted":
         print(f"  verifier: {cfg.bon_verifier_model} ({cfg.bon_verifier_backend})")
+    elif cfg.scaling_strategy.lower() == "pts_agent":
+        print(f"  verifier: {cfg.pts_verifier_model} ({cfg.pts_verifier_backend})")
+        print(f"  planner : N={cfg.pts_planner_n}, m={cfg.pts_planner_m}")
+        print(f"  translator: N={cfg.pts_translator_n}")
+        print(f"  summarizer: N={cfg.pts_summarizer_n}")
     print("=" * 60)
     
     # Load and setup environment
@@ -564,6 +634,22 @@ def _main() -> None:
             qwen_api_key=cfg.qwen_api_key,
             qwen_base_url=cfg.qwen_base_url,
         )
+    elif scaling_name == "pts_agent":
+        agent = PlannerTranslatorSummarizerStrategy(
+            env,
+            actor_llm=llm_wrapper,
+            planner_n=cfg.pts_planner_n,
+            planner_m=cfg.pts_planner_m,
+            planner_temperature=cfg.pts_planner_temperature,
+            translator_n=cfg.pts_translator_n,
+            translator_temperature=cfg.pts_translator_temperature,
+            summarizer_n=cfg.pts_summarizer_n,
+            summarizer_temperature=cfg.pts_summarizer_temperature,
+            verifier_model=cfg.pts_verifier_model,
+            verifier_backend=cfg.pts_verifier_backend,
+            qwen_api_key=cfg.qwen_api_key,
+            qwen_base_url=cfg.qwen_base_url,
+        )
     else:
         raise ValueError(f"Unknown scaling strategy: {scaling_name}")
 
@@ -573,6 +659,10 @@ def _main() -> None:
     agent._step_logger = simple_logger.log_step_candidates
     # Wire summary-step logger
     agent._summary_logger = simple_logger.log_summary_step
+    # Wire planner-phase logger
+    agent._planner_logger = simple_logger.log_planner_candidates
+    # Wire summarizer-phase logger
+    agent._summarizer_logger = simple_logger.log_summarizer_candidates
     print(f"  ✓ Strategy: {scaling_name}")
     print(f"  ✓ Agent ready: {agent.name}")
     

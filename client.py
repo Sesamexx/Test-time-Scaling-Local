@@ -89,6 +89,17 @@ class AppConfig:
     bon_verifier_model: str = "qwen3-vl"
     bon_verifier_backend: str = "local"  # "local" or "openai_compatible"
 
+    # -- PTS agent settings --
+    pts_planner_n: int = 3
+    pts_planner_m: int = 1
+    pts_planner_temperature: float = 0.7
+    pts_translator_n: int = 3
+    pts_translator_temperature: float = 0.7
+    pts_summarizer_n: int = 3
+    pts_summarizer_temperature: float = 0.7
+    pts_verifier_model: str = "qwen3-vl"
+    pts_verifier_backend: str = "local"
+
     # -- OpenAI-compatible verifier endpoint (loaded from .env) --
     qwen_api_key: str = ""
     qwen_base_url: str = ""
@@ -104,6 +115,7 @@ class AppConfig:
         bench = data.get("benchmark", {})
         scl = data.get("scaling", {})
         bon = scl.get("best_of_n_weighted", {})
+        pts = scl.get("pts_agent", {})
 
         return cls(
             # model
@@ -139,6 +151,26 @@ class AppConfig:
             ),
             bon_verifier_backend=bon.get(
                 "verifier_backend", cls.bon_verifier_backend
+            ),
+            # PTS agent
+            pts_planner_n=pts.get("planner_n", cls.pts_planner_n),
+            pts_planner_m=pts.get("planner_m", cls.pts_planner_m),
+            pts_planner_temperature=pts.get(
+                "planner_temperature", cls.pts_planner_temperature
+            ),
+            pts_translator_n=pts.get("translator_n", cls.pts_translator_n),
+            pts_translator_temperature=pts.get(
+                "translator_temperature", cls.pts_translator_temperature
+            ),
+            pts_summarizer_n=pts.get("summarizer_n", cls.pts_summarizer_n),
+            pts_summarizer_temperature=pts.get(
+                "summarizer_temperature", cls.pts_summarizer_temperature
+            ),
+            pts_verifier_model=pts.get(
+                "verifier_model", cls.pts_verifier_model
+            ),
+            pts_verifier_backend=pts.get(
+                "verifier_backend", cls.pts_verifier_backend
             ),
             # OpenAI-compatible endpoint secrets from environment / .env
             qwen_api_key=os.environ.get("QWEN_API_KEY", cls.qwen_api_key),

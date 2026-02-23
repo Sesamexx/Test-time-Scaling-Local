@@ -150,6 +150,18 @@ class ScalingStrategy(base_agent.EnvironmentInteractingAgent):
         self._summary_logger: Optional[
             Callable[[int, str, str], None]
         ] = None
+        # Optional callback for planner-phase logging.
+        # Signature: (candidates: list[str], selected_indices: list[int],
+        #             verifier_response: str) -> None
+        self._planner_logger: Optional[
+            Callable[[list[str], list[int], str], None]
+        ] = None
+        # Optional callback for summarizer-phase logging.
+        # Signature: (candidates: list[str], selected_index: int,
+        #             verifier_response: str) -> None
+        self._summarizer_logger: Optional[
+            Callable[[list[str], int, str], None]
+        ] = None
 
     # ----- public helpers (same interface as M3A) -----
 
